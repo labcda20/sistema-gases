@@ -1017,7 +1017,7 @@
     const logoImg = document.getElementById("main-header-logo");
     if (logoImg) {
       logoImg.onerror = function() { this.onerror = null; this.src = LOGO_BASE64; };
-      if (typeof google !== "undefined" && google.script) { logoImg.src = LOGO_BASE64; }
+      logoImg.src = LOGO_BASE64;
     }
 
     const isGAS = typeof google !== 'undefined' && google.script && google.script.run;
@@ -1044,7 +1044,7 @@
       if(isGAS)result=await new Promise((resolve,reject)=>google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).apiRequest(action,data));
       else {
         if(!gasApiUrl)throw new Error('Configura la conexión con Apps Script.');
-        const response=await fetch(gasApiUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({...data,action})});
+        const response=await fetch(idToken?'https://script.google.com/macros/s/AKfycbyURfpZby9rIWmBXXkKLAgIWOPLVxLWXHju4ZPEONxJ8eN0ifM_MoA8zk6qA9nNls5k/exec':gasApiUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({...data,action})});
         if(!response.ok)throw new Error('No se pudo conectar con Apps Script.');
         result=await response.json();
       }
@@ -1140,7 +1140,7 @@
     });
 
     function checkStoredSession(){clearGasSession();}
-    function clearGasSession(){sessionStorage.removeItem('gas_user');currentUser=null;currentToken=null;document.getElementById('view-login').classList.remove('hidden');}
+    function clearGasSession(){stopCamera();sessionStorage.removeItem('gas_user');currentUser=null;currentToken=null;document.getElementById('view-login').classList.remove('hidden');}
 
     function onLoginUserSelect(username) {
       if (username) {
@@ -1669,99 +1669,75 @@
     // ==========================================
     // SISTEMA ROBUSTO DE CÁMARA Y ESCÁNER QR
     // ==========================================
-    function toggleCamera() {
-      if (isCameraRunning) {
-        stopCamera();
-      } else {
-        startCamera();
-      }
+    // Camera lifecycle: user gesture only, cancellable permission requests and serial teardown.
+    const GAS_CAMERA={queue:Promise.resolve(),generation:0,starting:false,found:false};
+    function cameraMessage(text,error=false){
+      const box=document.getElementById('cam-error-box');box.textContent=text;box.classList.toggle('hidden',!text);box.setAttribute('role','status');box.setAttribute('aria-live','polite');
+      box.dataset.tone=error?'error':'info';
     }
-
-    async function startCamera() {
-      const errBox = document.getElementById('cam-error-box');
-      errBox.classList.add('hidden');
-      errBox.innerHTML = '';
-
-      const msgElem = document.getElementById('scanner-idle-msg');
-      msgElem.style.display = 'none';
-
-      try {
-        if (!html5QrScanner) {
-          html5QrScanner = new Html5Qrcode("qr-reader");
+    function gasCameraControls(active,starting=false){
+      isCameraRunning=active;GAS_CAMERA.starting=starting;
+      document.getElementById('btn-cam-text').textContent=starting?'Cancelar activación':active?'Detener cámara':'Activar cámara en vivo';
+      document.getElementById('btn-toggle-cam').setAttribute('aria-pressed',String(active||starting));
+      document.getElementById('scanner-idle-msg').style.display=active?'none':'';
+    }
+    function queueGasCamera(task){const result=GAS_CAMERA.queue.then(task);GAS_CAMERA.queue=result.catch(()=>{});return result;}
+    async function releaseGasCamera(){
+      const host=document.getElementById('qr-reader');const reader=html5QrScanner;
+      const tracks=[...host.querySelectorAll('video')].flatMap(v=>v.srcObject?v.srcObject.getTracks():[]);
+      try{if(reader&&(reader.isScanning||[2,3].includes(reader.getState?.())))await reader.stop();}
+      catch(error){console.warn('Cierre del lector QR:',error);}
+      finally{tracks.forEach(track=>track.stop());if(reader){try{reader.clear();}catch(_){}}host.replaceChildren();html5QrScanner=null;}
+    }
+    function toggleCamera(){return isCameraRunning||GAS_CAMERA.starting?stopCamera():startCamera();}
+    function startCamera(){
+      if(!currentUser)return Promise.resolve();
+      const generation=++GAS_CAMERA.generation;GAS_CAMERA.found=false;gasCameraControls(false,true);cameraMessage('Solicitando acceso a la cámara. Pulsa Permitir en tu navegador.');
+      return queueGasCamera(async()=>{
+        try{
+          await releaseGasCamera();if(generation!==GAS_CAMERA.generation||!currentUser)return;
+          if(!window.isSecureContext||!navigator.mediaDevices?.getUserMedia)throw new Error('La cámara requiere una conexión HTTPS y un navegador compatible.');
+          const policy=document.permissionsPolicy||document.featurePolicy;
+          if(policy?.allowsFeature&&!policy.allowsFeature('camera'))throw new Error('Abre la herramienta completa desde Mi Laboratorio para usar la cámara.');
+          if(typeof Html5Qrcode==='undefined')throw new Error('No se cargó el lector QR. Revisa la conexión y vuelve a cargar la página.');
+          html5QrScanner=new Html5Qrcode('qr-reader',{formatsToSupport:[Html5QrcodeSupportedFormats.QR_CODE],verbose:false});
+          const config={fps:10,qrbox:(w,h)=>{const size=Math.max(50,Math.floor(Math.min(w,h)*.7));return {width:size,height:size};}};
+          const found=text=>{
+            if(generation!==GAS_CAMERA.generation||GAS_CAMERA.found)return;
+            GAS_CAMERA.found=true;
+            stopCamera().then(()=>{if(!currentUser)return;document.getElementById('manual-qr-input').value=text;handleManualCode();cameraMessage('QR reconocido. La cámara se ha detenido.');});
+          };
+          try{await html5QrScanner.start({facingMode:{ideal:'environment'}},config,found,()=>{});}
+          catch(error){if(/Overconstrained|ConstraintNotSatisfied|NotFound/.test(String(error)))await html5QrScanner.start({facingMode:{ideal:'user'}},config,found,()=>{});else throw error;}
+          const video=document.querySelector('#qr-reader video');
+          if(video){video.muted=true;video.autoplay=true;video.playsInline=true;video.setAttribute('playsinline','');}
+          if(generation!==GAS_CAMERA.generation||!currentUser){await releaseGasCamera();return;}
+          gasCameraControls(true);cameraMessage('Cámara activa. Coloca el QR dentro del recuadro.');
+        }catch(error){
+          await releaseGasCamera();if(generation!==GAS_CAMERA.generation)return;gasCameraControls(false);
+          const text=[error?.name,error?.message,String(error)].join(' ');
+          cameraMessage(/NotAllowed|Permission|denied/i.test(text)?'Permite la cámara para labcda20.github.io en tu navegador y vuelve a pulsar Activar cámara.':/NotReadable|TrackStart|in use/i.test(text)?'La cámara está ocupada. Cierra la otra aplicación y vuelve a intentarlo.':/NotFound|DevicesNotFound/i.test(text)?'No se encontró una cámara disponible. Conecta una cámara y vuelve a intentarlo.':error.message||String(error),true);
         }
-
-        // Obtener lista de cámaras disponibles
-        const cameras = await Html5Qrcode.getCameras();
-        let selectedCameraId = null;
-
-        if (cameras && cameras.length > 0) {
-          // Intentar elegir cámara trasera
-          const backCam = cameras.find(c => c.label.toLowerCase().includes('back') || c.label.toLowerCase().includes('trasera') || c.label.toLowerCase().includes('environment'));
-          selectedCameraId = backCam ? backCam.id : cameras[cameras.length - 1].id;
-        }
-
-        const cameraConfig = selectedCameraId ? selectedCameraId : { facingMode: "environment" };
-        const qrConfig = { fps: 10, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0 };
-
-        await html5QrScanner.start(
-          cameraConfig,
-          qrConfig,
-          (decodedText) => {
-            showToast(`QR detectado: ${decodedText}`, 'success');
-            stopCamera();
-            document.getElementById('manual-qr-input').value = decodedText;
-            handleManualCode();
-          },
-          (error) => {
-            // scanning loop...
-          }
-        );
-
-        isCameraRunning = true;
-        document.getElementById('btn-cam-text').innerText = 'Detener Cámara';
-        document.getElementById('btn-toggle-cam').classList.replace('bg-cyan-600', 'bg-rose-600');
-
-      } catch (err) {
-        console.error('Error al iniciar cámara:', err);
-        msgElem.style.display = 'block';
-        errBox.classList.remove('hidden');
-        errBox.innerHTML = `
-          <strong>No se pudo abrir el stream de video:</strong> ${err.message || err}.<br>
-          <span class="text-slate-600 mt-1 block">💡 <em>Tip: Si tu navegador bloquea el acceso en vivo o estás en un entorno embebido, usa el botón de al lado: <strong>"Tomar Foto del QR"</strong> que funciona en cualquier dispositivo.</em></span>
-        `;
-      }
+      });
     }
-
-    function stopCamera() {
-      if (html5QrScanner && isCameraRunning) {
-        html5QrScanner.stop().then(() => {
-          html5QrScanner.clear();
-          isCameraRunning = false;
-          document.getElementById('btn-cam-text').innerText = 'Iniciar Cámara en Vivo';
-          document.getElementById('btn-toggle-cam').classList.replace('bg-rose-600', 'bg-cyan-600');
-          document.getElementById('scanner-idle-msg').style.display = 'block';
-        }).catch(err => console.error(err));
-      }
+    function stopCamera(){
+      ++GAS_CAMERA.generation;gasCameraControls(false);cameraMessage('Cámara detenida.');
+      return queueGasCamera(releaseGasCamera);
     }
-
-    // Escáner instantáneo por Foto o Archivo (infalible en móviles)
-    async function handleQRFile(input) {
-      if (!input.files || input.files.length === 0) return;
-      const file = input.files[0];
-      showToast('Analizando foto de código QR...', 'info');
-
-      try {
-        if (!html5QrScanner) {
-          html5QrScanner = new Html5Qrcode("qr-reader");
-        }
-        const decodedText = await html5QrScanner.scanFile(file, true);
-        showToast(`QR Detectado: ${decodedText}`, 'success');
-        document.getElementById('manual-qr-input').value = decodedText;
-        handleManualCode();
-      } catch (err) {
-        showToast('No se encontró ningún código QR legible en la imagen. Intenta enfocar más cerca.', 'error');
-      }
+    async function handleQRFile(input){
+      const file=input.files?.[0];if(!file)return;
+      const generation=++GAS_CAMERA.generation;gasCameraControls(false,true);input.value='';cameraMessage('Leyendo el QR de la imagen…');
+      return queueGasCamera(async()=>{
+        try{await releaseGasCamera();if(generation!==GAS_CAMERA.generation||!currentUser)return;
+          if(typeof Html5Qrcode==='undefined')throw new Error('No se cargó el lector QR.');
+          html5QrScanner=new Html5Qrcode('qr-reader');const text=await html5QrScanner.scanFile(file,false);
+          if(generation===GAS_CAMERA.generation&&currentUser){document.getElementById('manual-qr-input').value=text;handleManualCode();cameraMessage('QR reconocido.');}
+        }catch(error){if(generation===GAS_CAMERA.generation)cameraMessage('No se encontró un QR legible. Prueba otra imagen o escribe el ID.',true);}
+        finally{await releaseGasCamera();if(generation===GAS_CAMERA.generation)gasCameraControls(false);}
+      });
     }
+    document.addEventListener('visibilitychange',()=>{if(document.hidden)stopCamera();});
+    window.addEventListener('pagehide',()=>{stopCamera();});
 
     // ==========================================
     // ENVÍO DE LECTURA DE PRESIÓN
@@ -2363,8 +2339,11 @@ window.waterlabsBridge=(()=>{
   }
   return {get active(){return active;}, async credential(){return active?token():null;}, stop(){active=false;blocked=true;for(const job of pending.values()){clearTimeout(job.timer);job.reject(new Error('Sesión cerrada.'));}pending.clear();}, async start(){
     if(!enabled)return;
+    let status=document.getElementById('waterlabs-entry-status');
+    if(!status){status=document.createElement('p');status.id='waterlabs-entry-status';status.setAttribute('role','status');status.style.cssText='font-size:13px;line-height:1.5;color:#1e3a8a;text-align:center;margin-top:12px';document.querySelector('#view-login > div')?.append(status);}
+    status.textContent='Confirmando tu acceso desde Mi Laboratorio…';
     try{const idToken=await token();active=true;const result=await sendBackendRequest('loginSuite',{idToken});if(!result?.success)throw new Error(result?.error||'Acceso no autorizado.');window.applySuiteSession(result);}
-    catch(error){active=false;showToast(error.message,'error');}
+    catch(error){active=false;status.textContent=error.message;showToast(error.message,'error');}
   }};
 })();
 window.addEventListener('DOMContentLoaded',()=>window.waterlabsBridge.start());
