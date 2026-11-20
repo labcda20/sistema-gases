@@ -1707,8 +1707,8 @@
             GAS_CAMERA.found=true;
             stopCamera().then(()=>{if(!currentUser)return;document.getElementById('manual-qr-input').value=text;handleManualCode();cameraMessage('QR reconocido. La cámara se ha detenido.');});
           };
-          try{await html5QrScanner.start({facingMode:{ideal:'environment'}},config,found,()=>{});}
-          catch(error){if(/Overconstrained|ConstraintNotSatisfied|NotFound/.test(String(error)))await html5QrScanner.start({facingMode:{ideal:'user'}},config,found,()=>{});else throw error;}
+          try{await html5QrScanner.start({facingMode:'environment'},config,found,()=>{});}
+          catch(error){if(/Overconstrained|ConstraintNotSatisfied|NotFound/.test(String(error)))await html5QrScanner.start({facingMode:'user'},config,found,()=>{});else throw error;}
           const video=document.querySelector('#qr-reader video');
           if(video){video.muted=true;video.autoplay=true;video.playsInline=true;video.setAttribute('playsinline','');}
           if(generation!==GAS_CAMERA.generation||!currentUser){await releaseGasCamera();return;}
